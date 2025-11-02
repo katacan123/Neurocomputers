@@ -5,9 +5,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from sklearn.model_selection import train_test_split
 
-from prepare_amp_data import CSIAmpDataset   # your class
-from model_csi import CSI1DCNNCount
+from prepare_amp_data import CSIAmpDataset   # your dataset class
+from model_csi import CSI1DCNNCount         # your model class
 
 # ---------- CONFIG ----------
 DATA_DIR = r"D:\ee543\data"     # change to your path
@@ -18,22 +19,27 @@ LR = 1e-3
 MAX_LEN = 3000
 USE_BAND = 2.4   # set to 5.0 or None
 
-def split_by_env(df, train_env="classroom", val_env=None):
+TRAIN_ENVS = ("classroom", "meeting_room")
+TEST_ENV = "empty_room"   # check exact name in your csv! maybe "empty" or "emptyroom"
+
+
+def split_env_with_val(df, train_envs, test_env, val_ratio=0.2):
     """
-    HW wants env/location generalization.
-    If val_env is given, we do env-based split.
-    Otherwise fallback to 80/20 random.
+    1) train+val = rows whose environment is in train_envs
+    2) test       = rows whose environment == test_env
+    3) train+val are split randomly (NOT by location) just to get a val set
     """
-    if val_env is not None:
-        train_df = df[df["environment"] == train_env].reset_index(drop=True)
-        val_df = df[df["environment"] == val_env].reset_index(drop=True)
-    else:
-        df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
-        n = len(df)
-        n_train = int(0.8 * n)
-        train_df = df.iloc[:n_train].reset_index(drop=True)
-        val_df = df.iloc[n_train:].reset_index(drop=True)
-    return train_df, val_df
+    train_all = df[df["environment"].isin(train_envs)].reset_index(drop=True)
+    test_df = df[df["environment"] == test_env].reset_index(drop=True)
+
+    # random split inside train_all
+    train_df, val_df = train_test_split(
+        train_all, test_size=val_ratio, random_state=42, shuffle=True
+    )
+    train_df = train_df.reset_index(drop=True)
+    val_df = val_df.reset_index(drop=True)
+    return train_df, val_df, test_df
+
 
 def train_one_epoch(model, loader, optimizer, device, loss_fn):
     model.train()
@@ -58,6 +64,7 @@ def train_one_epoch(model, loader, optimizer, device, loss_fn):
 
     return total_loss / total, total_correct / total
 
+
 @torch.no_grad()
 def eval_one_epoch(model, loader, device, loss_fn):
     model.eval()
@@ -79,6 +86,7 @@ def eval_one_epoch(model, loader, device, loss_fn):
 
     return total_loss / total, total_correct / total
 
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
@@ -90,9 +98,17 @@ def main():
     if USE_BAND is not None:
         df = df[df["wifi_band"] == USE_BAND].reset_index(drop=True)
 
-    # 3) split
-    # change to split_by_env(df, train_env="classroom", val_env="meeting_room") if you know env names
-    train_df, val_df = split_by_env(df, val_env=None)
+    # 3) split by environment
+    train_df, val_df, test_df = split_env_with_val(
+        df,
+        train_envs=TRAIN_ENVS,
+        test_env=TEST_ENV,
+        val_ratio=0.2,
+    )
+
+    print(f"Train samples: {len(train_df)}")
+    print(f"Val samples:   {len(val_df)}")
+    print(f"Test samples:  {len(test_df)}")
 
     # 4) datasets
     train_ds = CSIAmpDataset(
@@ -109,11 +125,20 @@ def main():
         ids=val_df["label"].tolist(),
         wifi_band=USE_BAND,
     )
+    test_ds = CSIAmpDataset(
+        csv_path=CSV_PATH,
+        data_root=DATA_DIR,
+        max_len=MAX_LEN,
+        ids=test_df["label"].tolist(),
+        wifi_band=USE_BAND,
+    )
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE,
                               shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE,
                             shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE,
+                             shuffle=False, num_workers=0)
 
     # 5) model
     model = CSI1DCNNCount(in_channels=270, n_classes=6).to(device)
@@ -134,9 +159,17 @@ def main():
               f"train loss {train_loss:.4f} acc {train_acc:.3f} | "
               f"val loss {val_loss:.4f} acc {val_acc:.3f}")
 
-    # 8) save
+    # 8) AUTO TEST AFTER TRAIN
+    test_loss, test_acc = eval_one_epoch(
+        model, test_loader, device, loss_fn
+    )
+    print(f"\n=== FINAL TEST ON '{TEST_ENV}' (band={USE_BAND}) ===")
+    print(f"test loss {test_loss:.4f} | test acc {test_acc:.3f}")
+
+    # 9) save
     torch.save(model.state_dict(), "csi_count_amp_24ghz.pth")
     print("Saved to csi_count_amp_24ghz.pth")
+
 
 if __name__ == "__main__":
     main()
