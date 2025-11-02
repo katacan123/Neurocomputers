@@ -9,9 +9,11 @@ from sklearn.model_selection import train_test_split
 
 from prepare_amp_data import CSIAmpDataset   # your dataset class
 from model_csi import CSI1DCNNCount         # your model class
+from tqdm import tqdm
 
 # ---------- CONFIG ----------
-DATA_DIR = r"D:\ee543\data"     # change to your path
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "training_dataset"))
 CSV_PATH = os.path.join(DATA_DIR, "annotation.csv")
 BATCH_SIZE = 16
 EPOCHS = 5
@@ -47,7 +49,7 @@ def train_one_epoch(model, loader, optimizer, device, loss_fn):
     total_correct = 0
     total = 0
 
-    for x, y_count in loader:
+    for x, y_count in tqdm(loader, desc="train", ncols=100):
         x = x.to(device)          # (B, 270, 3000)
         y_count = y_count.to(device)
 
@@ -72,7 +74,7 @@ def eval_one_epoch(model, loader, device, loss_fn):
     total_correct = 0
     total = 0
 
-    for x, y_count in loader:
+    for x, y_count in tqdm(loader, desc="eval", ncols=100):
         x = x.to(device)
         y_count = y_count.to(device)
 

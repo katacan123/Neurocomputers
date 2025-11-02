@@ -31,7 +31,7 @@ class CSIAmpDataset(Dataset):
         ids: optional list of labels (act_1_1, act_1_2, ...)
         wifi_band: 2.4 or 5.0 or None (means use all)
         """
-        df = pd.read_csv("dataset/annotation.csv")
+        df = pd.read_csv(csv_path)
 
         # filter by band if wanted
         if wifi_band is not None:
