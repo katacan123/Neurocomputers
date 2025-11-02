@@ -42,7 +42,7 @@ class CSIAmpDataset(Dataset):
             df = df[df["label"].isin(ids)]
 
         self.df = df.reset_index(drop=True)
-        self.data_root = Path("dataset/wifi_csi/amp")
+        self.data_root = Path(data_root + "/wifi_csi/amp")
         self.max_len = max_len
 
     def __len__(self):
@@ -66,7 +66,7 @@ class CSIAmpDataset(Dataset):
 
         # --------- load amplitude array ---------
         label = row["label"]  # e.g. act_1_1
-        fpath = self.data_root / "wifi_csi" / "amp" / f"{label}.npy"
+        fpath = self.data_root / f"{label}.npy"
         amp = np.load(fpath)  # (T,3,3,30) or (T,270)
 
         # (T, 3, 3, 30) -> (T, 270)
