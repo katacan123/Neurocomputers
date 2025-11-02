@@ -49,7 +49,7 @@ def train_one_epoch(model, loader, optimizer, device, loss_fn):
     total_correct = 0
     total = 0
 
-    for x, y_count in tqdm(loader, desc="train", ncols=100):
+    for x, y_count, _ in tqdm(loader, desc="train", ncols=100):
         x = x.to(device)          # (B, 270, 3000)
         y_count = y_count.to(device)
 
@@ -74,7 +74,7 @@ def eval_one_epoch(model, loader, device, loss_fn):
     total_correct = 0
     total = 0
 
-    for x, y_count in tqdm(loader, desc="eval", ncols=100):
+    for x, y_count, _ in tqdm(loader, desc="eval", ncols=100):
         x = x.to(device)
         y_count = y_count.to(device)
 
