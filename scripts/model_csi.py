@@ -13,19 +13,19 @@ class CSI1DCNNCount(nn.Module):
 
         self.features = nn.Sequential(
             nn.Conv1d(in_channels, 64, kernel_size=9, padding=4),
-            nn.BatchNorm1d(64),
+            nn.GroupNorm(8, 64),   # 8 groups, 64 channels
             nn.ReLU(),
-            nn.MaxPool1d(2),  # 3000 -> 1500
+            nn.MaxPool1d(2),       # 3000 -> 1500
 
             nn.Conv1d(64, 128, kernel_size=9, padding=4),
-            nn.BatchNorm1d(128),
+            nn.GroupNorm(8, 128),
             nn.ReLU(),
-            nn.MaxPool1d(2),  # 1500 -> 750
+            nn.MaxPool1d(2),       # 1500 -> 750
 
             nn.Conv1d(128, 256, kernel_size=9, padding=4),
-            nn.BatchNorm1d(256),
+            nn.GroupNorm(8, 256),
             nn.ReLU(),
-            nn.MaxPool1d(2),  # 750 -> 375
+            nn.MaxPool1d(2),       # 750 -> 375
         )
 
         self.gap = nn.AdaptiveAvgPool1d(1)  # (B,256,1) -> (B,256)

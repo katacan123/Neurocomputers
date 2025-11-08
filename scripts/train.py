@@ -147,7 +147,11 @@ def main():
 
     # 6) loss + optimizer
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=LR,
+        weight_decay=1e-4,   # <- added L2 regularization
+    )
 
     # 7) train
     for epoch in range(1, EPOCHS + 1):

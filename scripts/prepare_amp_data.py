@@ -77,8 +77,31 @@ class CSIAmpDataset(Dataset):
         # pad/crop time dim
         amp = self._pad_or_crop(amp)  # (max_len, 270)
 
+        # --------- STEP 2 & 3: log, domain randomization, normalization ---------
+        # ensure float32
+        amp = amp.astype(np.float32)
+
+        # 1) log-amplitude to compress dynamic range
+        amp = np.log1p(amp)
+
+        # 2) domain randomization (applied to all samples here)
+        #    (a) random global gain & offset
+        gain = np.random.uniform(0.9, 1.1)
+        offset = np.random.normal(0.0, 0.02)
+        amp = gain * amp + offset
+
+        #    (b) feature dropout (channel masking)
+        mask_prob = 0.02  # 2% of channels zeroed
+        mask = (np.random.rand(1, amp.shape[1]) > mask_prob).astype(np.float32)
+        amp = amp * mask
+
+        # 3) sample-wise standardization (global mean/std over this example)
+        mean = amp.mean()
+        std = amp.std() + 1e-6
+        amp = (amp - mean) / std
+
         # to torch, and put channels first for Conv1d
-        x = torch.from_numpy(amp).float().permute(1, 0)  # (270, max_len)   because Conv1d expects (C, L)
+        x = torch.from_numpy(amp).permute(1, 0)  # (270, max_len)
 
         # --------- labels ---------
         # human count:
@@ -86,7 +109,7 @@ class CSIAmpDataset(Dataset):
         num_users = y_count
         y_count = torch.tensor(y_count, dtype=torch.long)
 
-                # 1) collect ALL non-empty activities from 6 slots
+        # 1) collect ALL non-empty activities from 6 slots
         all_acts = []
         for i in range(1, 7):   # 1..6
             col = f"user_{i}_activity"
