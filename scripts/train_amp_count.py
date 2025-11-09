@@ -41,9 +41,9 @@ def split_env_e1_train_e2_val_e3_test(df, val_ratio=0.2, random_state=42):
     Stratify kriteri: number_of_users (count dağılımını korur)
     """
     # Filtreler
-    df_e1 = df[df["environment"] == "E1"]
-    df_e2 = df[df["environment"] == "E2"]
-    df_e3 = df[df["environment"] == "E3"]
+    df_e1 = df[df["environment"] == "classroom"]
+    df_e2 = df[df["environment"] == "meeting_room"]
+    df_e3 = df[df["environment"] == "empty_room"]
 
     # E1 tamamen train
     train_labels = df_e1["label"].tolist()
