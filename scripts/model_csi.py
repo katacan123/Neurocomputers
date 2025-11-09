@@ -1,45 +1,58 @@
-# model_csi.py
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-class CSI1DCNNCount(nn.Module):
-    """
-    1D CNN for CSI human counting (0..5 people)
-    Input: (B, 270, 3000)
-    Output: (B, 6)
-    """
-    def __init__(self, in_channels=270, n_classes=6):
+
+class ChSE(nn.Module):
+    def __init__(self, c, r=8):
         super().__init__()
-
-        self.features = nn.Sequential(
-            nn.Conv1d(in_channels, 64, kernel_size=9, padding=4),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.MaxPool1d(2),  # 3000 -> 1500
-
-            nn.Conv1d(64, 128, kernel_size=9, padding=4),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.MaxPool1d(2),  # 1500 -> 750
-
-            nn.Conv1d(128, 256, kernel_size=9, padding=4),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.MaxPool1d(2),  # 750 -> 375
-        )
-
-        self.gap = nn.AdaptiveAvgPool1d(1)  # (B,256,1) -> (B,256)
-        self.fc = nn.Sequential(
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-        )
-        self.classifier = nn.Linear(256, n_classes)
-
+        self.fc1 = nn.Conv1d(c, c // r, 1)
+        self.fc2 = nn.Conv1d(c // r, c, 1)
     def forward(self, x):
-        # x: (B, C, T)
-        x = self.features(x)
-        x = self.gap(x).squeeze(-1)  # (B, 256)
-        x = self.fc(x)
-        logits = self.classifier(x)  # (B, 6)
-        return logits
+        w = x.mean(dim=-1, keepdim=True)
+        w = F.silu(self.fc1(w))
+        w = torch.sigmoid(self.fc2(w))
+        return x * w
+
+
+class TCNBlock(nn.Module):
+    def __init__(self, c, dilation=1, p_drop=0.2):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(c, c, 3, padding=dilation, dilation=dilation),
+            nn.BatchNorm1d(c),
+            nn.SiLU(),
+            nn.Dropout(p_drop),
+            nn.Conv1d(c, c, 3, padding=dilation, dilation=dilation),
+            nn.BatchNorm1d(c),
+            ChSE(c)
+        )
+    def forward(self, x):
+        return F.silu(x + self.net(x))
+
+
+class CSI1DTCNCount(nn.Module):
+    def __init__(self, in_channels=540, n_classes=6, depth=5, stem_channels=256, p_drop=0.2):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_channels, stem_channels, 3, padding=1),
+            nn.BatchNorm1d(stem_channels),
+            nn.SiLU(),
+        )
+        blocks, dil = [], 1
+        for _ in range(depth):
+            blocks.append(TCNBlock(stem_channels, dilation=dil, p_drop=p_drop))
+            dil *= 2
+        self.tcn = nn.Sequential(*blocks)
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(stem_channels, 256),
+            nn.SiLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, n_classes)
+        )
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.tcn(x)
+        return self.head(x)
