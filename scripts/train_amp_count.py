@@ -10,7 +10,7 @@ from tqdm import tqdm
 from data_amp import AmpCSIDataset
 from model_amp_count import AmpCountNet
 
-# ---- PATHS (senin yapına göre) ----
+# ---- PATHS ----
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_BASE_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "training_dataset"))
 AMP_DIR   = os.path.join(DATASET_BASE_DIR, "wifi_csi", "amp")
@@ -27,7 +27,7 @@ USE_LOWPASS = True
 N_PCA = 5
 P_DROP = 0.3
 EARLY_STOP_PATIENCE = 7
-USE_AMP = True  # mixed precision
+USE_AMP = True
 
 def set_seed(s=SEED):
     random.seed(s); np.random.seed(s)
@@ -47,53 +47,49 @@ def split_env_ids(df, test_env_key="E3"):
     idx_train = idx_trainval[n_val:]
 
     return (
-        df.loc[idx_train, "id"].tolist(),
-        df.loc[idx_val,   "id"].tolist(),
-        df.loc[idx_test,  "id"].tolist(),
+        df.loc[idx_train, "label"].tolist(),
+        df.loc[idx_val,   "label"].tolist(),
+        df.loc[idx_test,  "label"].tolist(),
     )
 
 def compute_class_weights(df, ids):
-    sub = df[df["id"].isin(ids)]
-    counts = sub["count"].value_counts().sort_index()
+    sub = df[df["label"].isin(ids)]
+    counts = sub["number_of_users"].value_counts().sort_index()
     maxc = counts.max()
-    weights = torch.tensor([maxc / counts.get(i, 1) for i in range(int(df["count"].max())+1)], dtype=torch.float32)
+    weights = torch.tensor([maxc / counts.get(i, 1) for i in range(int(df["number_of_users"].max())+1)], dtype=torch.float32)
     return weights
 
 def make_loaders():
     df = pd.read_csv(ANNOT_CSV)
-    for col in ["id","count","environment"]:
+    for col in ["label","number_of_users","environment"]:
         assert col in df.columns, f"{col} missing in annotation.csv"
+
     train_ids, val_ids, test_ids = split_env_ids(df, test_env_key="E3")
 
-    train_ds = AmpCSIDataset(ANNOT_CSV, AMP_DIR, ids=train_ids, target_len=TARGET_LEN,
-                             use_svd=USE_SVD, use_lowpass=USE_LOWPASS, n_pca=N_PCA)
-    val_ds   = AmpCSIDataset(ANNOT_CSV, AMP_DIR, ids=val_ids,   target_len=TARGET_LEN,
-                             use_svd=USE_SVD, use_lowpass=USE_LOWPASS, n_pca=N_PCA)
-    test_ds  = AmpCSIDataset(ANNOT_CSV, AMP_DIR, ids=test_ids,  target_len=TARGET_LEN,
-                             use_svd=USE_SVD, use_lowpass=USE_LOWPASS, n_pca=N_PCA)
+    train_ds = AmpCSIDataset(ANNOT_CSV, AMP_DIR, ids=train_ids,
+                             target_len=TARGET_LEN, use_svd=USE_SVD, use_lowpass=USE_LOWPASS, n_pca=N_PCA)
+    val_ds   = AmpCSIDataset(ANNOT_CSV, AMP_DIR, ids=val_ids,
+                             target_len=TARGET_LEN, use_svd=USE_SVD, use_lowpass=USE_LOWPASS, n_pca=N_PCA)
+    test_ds  = AmpCSIDataset(ANNOT_CSV, AMP_DIR, ids=test_ids,
+                             target_len=TARGET_LEN, use_svd=USE_SVD, use_lowpass=USE_LOWPASS, n_pca=N_PCA)
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH, shuffle=True,  num_workers=0, pin_memory=False)
-    val_loader   = DataLoader(val_ds,   batch_size=BATCH, shuffle=False, num_workers=0, pin_memory=False)
-    test_loader  = DataLoader(test_ds,  batch_size=BATCH, shuffle=False, num_workers=0, pin_memory=False)
-    return train_loader, val_loader, test_loader, train_ds, val_ds, test_ds, df, train_ids
+    train_loader = DataLoader(train_ds, batch_size=BATCH, shuffle=True,  num_workers=0)
+    val_loader   = DataLoader(val_ds,   batch_size=BATCH, shuffle=False, num_workers=0)
+    test_loader  = DataLoader(test_ds,  batch_size=BATCH, shuffle=False, num_workers=0)
+    return train_loader, val_loader, test_loader, df, train_ids
 
 def main():
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    (train_loader, val_loader, test_loader,
-     train_ds, val_ds, test_ds, df, train_ids) = make_loaders()
+    train_loader, val_loader, test_loader, df, train_ids = make_loaders()
 
-    # infer dims + num_counts
     x0, y0c, env0 = next(iter(train_loader))
     _, T, D = x0.shape
-    num_counts = int(df["count"].max()) + 1
+    num_counts = int(df["number_of_users"].max()) + 1
 
     model = AmpCountNet(in_dim=D, num_counts=num_counts, p_drop=P_DROP).to(device)
-
-    # class weights (train dağılımına göre)
     cls_w = compute_class_weights(df, train_ids).to(device)
     crit = nn.CrossEntropyLoss(weight=cls_w)
-
     opt = torch.optim.AdamW(model.parameters(), lr=LR)
     scaler = torch.cuda.amp.GradScaler(enabled=USE_AMP)
 
@@ -130,7 +126,6 @@ def main():
             if patience >= EARLY_STOP_PATIENCE:
                 print("Early stopping triggered."); break
 
-    # test (unseen env)
     model.load_state_dict(torch.load("amp_count_best.pt", map_location=device))
     ts_loss, ts_acc = run_epoch(test_loader, False)
     print(f"TEST (unseen env): loss={ts_loss:.4f} acc={ts_acc:.3f}")
