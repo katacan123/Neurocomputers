@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
+from sklearn.model_selection import StratifiedShuffleSplit
 from data_amp import AmpCSIDataset
 from model_amp_count import AmpCountNet
 
@@ -33,24 +33,41 @@ def set_seed(s=SEED):
     random.seed(s); np.random.seed(s)
     torch.manual_seed(s); torch.cuda.manual_seed_all(s)
 
-def split_env_ids(df, test_env_key="E3"):
-    envs = sorted(df["environment"].unique().tolist())
-    test_envs = [e for e in envs if str(test_env_key) in str(e)]
-    if not test_envs: test_envs = [envs[-1]]
-    trainval_envs = [e for e in envs if e not in test_envs]
+def split_env_e1_train_e2_val_e3_test(df, val_ratio=0.2, random_state=42):
+    """
+    E1 -> %100 train
+    E2 -> stratified split: train (%1 - val_ratio), val (%val_ratio)
+    E3 -> %100 test
+    Stratify kriteri: number_of_users (count dağılımını korur)
+    """
+    # Filtreler
+    df_e1 = df[df["environment"] == "E1"]
+    df_e2 = df[df["environment"] == "E2"]
+    df_e3 = df[df["environment"] == "E3"]
 
-    idx_trainval = df.index[df["environment"].isin(trainval_envs)].tolist()
-    idx_test = df.index[df["environment"].isin(test_envs)].tolist()
-    random.shuffle(idx_trainval)
-    n_val = max(1, int(0.1 * len(idx_trainval)))
-    idx_val = idx_trainval[:n_val]
-    idx_train = idx_trainval[n_val:]
+    # E1 tamamen train
+    train_labels = df_e1["label"].tolist()
 
-    return (
-        df.loc[idx_train, "label"].tolist(),
-        df.loc[idx_val,   "label"].tolist(),
-        df.loc[idx_test,  "label"].tolist(),
-    )
+    # E2'yi stratified train/val böl
+    val_labels = []
+    if len(df_e2) > 0:
+        y = df_e2["number_of_users"].astype(int).values
+        idx = df_e2.index.values
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=val_ratio, random_state=random_state)
+        tr_idx, vl_idx = next(splitter.split(np.zeros_like(y), y))
+        e2_train_idx = idx[tr_idx]
+        e2_val_idx   = idx[vl_idx]
+        train_labels += df.loc[e2_train_idx, "label"].tolist()
+        val_labels    = df.loc[e2_val_idx,   "label"].tolist()
+
+    # E3 tamamen test
+    test_labels = df_e3["label"].tolist()
+
+    # küçük kontrol çıktısı (isteğe bağlı)
+    print(f"Split -> E1 train: {len(df_e1)} | E2 train: {len(train_labels)-len(df_e1)} | "
+          f"E2 val: {len(val_labels)} | E3 test: {len(test_labels)}")
+
+    return train_labels, val_labels, test_labels
 
 def compute_class_weights(df, ids):
     sub = df[df["label"].isin(ids)]
@@ -64,7 +81,8 @@ def make_loaders():
     for col in ["label","number_of_users","environment"]:
         assert col in df.columns, f"{col} missing in annotation.csv"
 
-    train_ids, val_ids, test_ids = split_env_ids(df, test_env_key="E3")
+    # E1 train, E2 (kalan) val, E3 test
+    train_ids, val_ids, test_ids = split_env_e1_train_e2_val_e3_test(df, val_ratio=0.2, random_state=42)
 
     train_ds = AmpCSIDataset(ANNOT_CSV, AMP_DIR, ids=train_ids,
                              target_len=TARGET_LEN, use_svd=USE_SVD, use_lowpass=USE_LOWPASS, n_pca=N_PCA)
@@ -77,6 +95,7 @@ def make_loaders():
     val_loader   = DataLoader(val_ds,   batch_size=BATCH, shuffle=False, num_workers=0)
     test_loader  = DataLoader(test_ds,  batch_size=BATCH, shuffle=False, num_workers=0)
     return train_loader, val_loader, test_loader, df, train_ids
+
 
 def main():
     set_seed()
