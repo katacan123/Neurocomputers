@@ -5,7 +5,7 @@ import torch.nn as nn
 class CSI1DCNNCount(nn.Module):
     """
     1D CNN for CSI human counting (0..5 people)
-    Input: (B, 270, 3000)
+    Input: (B, C, T) where C can be 270 (amp) or >270 (amp+DS)
     Output: (B, 6)
     """
     def __init__(self, in_channels=270, n_classes=6):
@@ -13,22 +13,22 @@ class CSI1DCNNCount(nn.Module):
 
         self.features = nn.Sequential(
             nn.Conv1d(in_channels, 64, kernel_size=9, padding=4),
-            nn.GroupNorm(8, 64),   # 8 groups, 64 channels
+            nn.GroupNorm(8, 64),
             nn.ReLU(),
-            nn.MaxPool1d(2),       # 3000 -> 1500
+            nn.MaxPool1d(2),
 
             nn.Conv1d(64, 128, kernel_size=9, padding=4),
             nn.GroupNorm(8, 128),
             nn.ReLU(),
-            nn.MaxPool1d(2),       # 1500 -> 750
+            nn.MaxPool1d(2),
 
             nn.Conv1d(128, 256, kernel_size=9, padding=4),
             nn.GroupNorm(8, 256),
             nn.ReLU(),
-            nn.MaxPool1d(2),       # 750 -> 375
+            nn.MaxPool1d(2),
         )
 
-        self.gap = nn.AdaptiveAvgPool1d(1)  # (B,256,1) -> (B,256)
+        self.gap = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Sequential(
             nn.Linear(256, 256),
             nn.ReLU(),

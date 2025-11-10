@@ -5,48 +5,47 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pandas as pd
 from torch.utils.data import DataLoader
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, classification_report
 
-# Import preprocessing helpers and dataset
+from tqdm.auto import tqdm
+
 from wimans_preprocess import (
     build_sample_table,
-    split_by_environment,
     WiMANSCountDataset,
     ENV_COL,
+    BAND_COL,
 )
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-# Environment to use: must match values in annotations.csv (e.g. "classroom")
-ENV_NAME = "classroom"      # change to "meeting_room", "empty_room", or "all" as needed
-USE_BAND = "5G"             # "5G", "2.4G", or None for both
+TRAIN_ENVS = ("empty_room", "classroom")
+TEST_ENV = "meeting_room"       # unseen test environment
 
-TARGET_T = 3000             # pad/trim target time length before downsampling
-DOWNSAMPLE_FACTOR = 5       # e.g. 1 (no downsample), 5 (keep every 5th sample)
+USE_BAND = "5"                  # "2.4", "5" or None
+
+TARGET_T = 3000
+DOWNSAMPLE_FACTOR = 2
+
 BATCH_SIZE = 16
 EPOCHS = 40
 LR = 1e-3
 WEIGHT_DECAY = 1e-4
-NUM_CLASSES = 6             # 0..5 users
+NUM_CLASSES = 6
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-PRINT_EVERY = 50            # print train progress every N batches
 
 
 # ============================================================
-# MODEL: CSI-PCNH style (3D CNN + CAM + 2D CNN + LSTM)
+# MODEL (3D CNN + CAM + 2D CNN + LSTM)
 # ============================================================
 
 class ChannelAttention3D(nn.Module):
-    """
-    Channel Attention Module (CAM) for 3D feature maps.
-    Input: (B, C, D, H, W)
-    """
     def __init__(self, channels, reduction=16):
         super().__init__()
         hidden = max(channels // reduction, 1)
@@ -58,27 +57,17 @@ class ChannelAttention3D(nn.Module):
 
     def forward(self, x):
         B, C, D, H, W = x.shape
-
-        # Global average pooling
         avg_pool = F.adaptive_avg_pool3d(x, 1).view(B, C)
-        # Global max pooling
         max_pool = F.adaptive_max_pool3d(x, 1).view(B, C)
-
         avg_out = self.mlp(avg_pool)
         max_out = self.mlp(max_pool)
-
         attn = torch.sigmoid(avg_out + max_out).view(B, C, 1, 1, 1)
         return x * attn
 
 
 class Global3DBranch(nn.Module):
-    """
-    Global spatial-temporal branch:
-      3D CNN stacks + Channel Attention + global pooling
-    """
     def __init__(self, in_channels=1):
         super().__init__()
-        # CSI-PCNH uses multiple 3D conv blocks; we keep it reasonably light
         self.conv1 = nn.Conv3d(in_channels, 32, kernel_size=3, padding=1)
         self.conv2 = nn.Conv3d(32, 64, kernel_size=3, padding=1)
         self.conv3 = nn.Conv3d(64, 128, kernel_size=3, padding=1)
@@ -86,11 +75,9 @@ class Global3DBranch(nn.Module):
 
         self.pool = nn.MaxPool3d(kernel_size=(2, 2, 2))
         self.dropout = nn.Dropout3d(p=0.3)
-
         self.cam = ChannelAttention3D(256)
 
     def forward(self, x):
-        # x: (B, 1, T, H, W)
         x = F.relu(self.conv1(x))
         x = self.pool(x)
 
@@ -103,42 +90,26 @@ class Global3DBranch(nn.Module):
         x = F.relu(self.conv4(x))
         x = self.dropout(x)
 
-        # Channel Attention
         x = self.cam(x)
-
-        # Global average pool over (D,H,W)
         x = F.adaptive_avg_pool3d(x, 1).view(x.size(0), -1)  # (B, 256)
-        return x  # global feature vector
+        return x
 
 
 class Local2DTemporalBranch(nn.Module):
-    """
-    Local branch:
-      For each time step:
-        2D CNN -> FC -> sequence of features
-      Then LSTM over sequence -> local temporal feature.
-    """
     def __init__(self, in_channels=1, lstm_hidden=128, lstm_layers=1):
         super().__init__()
-        # 2D CNN blocks
         self.conv2d_1 = nn.Conv2d(in_channels, 32, kernel_size=3, padding=1)
         self.conv2d_2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.pool2d = nn.MaxPool2d(kernel_size=2)
         self.dropout2d = nn.Dropout2d(p=0.3)
 
-        # We'll infer flattened feature dim at runtime
         self.fc1 = None
         self.fc2 = None
-
+        self.lstm = None
         self.lstm_hidden = lstm_hidden
         self.lstm_layers = lstm_layers
-        self.lstm = None  # will be created after we know feature dim
 
     def _init_fc_and_lstm(self, feat_map_shape):
-        """
-        Initialize FC and LSTM layers once we know the feature map shape:
-        feat_map_shape: (C_out, H_out, W_out)
-        """
         C_out, H_out, W_out = feat_map_shape
         feat_dim = C_out * H_out * W_out
 
@@ -154,19 +125,10 @@ class Local2DTemporalBranch(nn.Module):
         )
 
     def forward(self, x3d):
-        """
-        x3d: (B, 1, T, H, W)
-        We treat each time slice as a 2D "image":
-          X_seq: (B, T, C=1, H, W)
-        """
         B, C_in, T, H, W = x3d.shape
+        x_seq = x3d.permute(0, 2, 1, 3, 4)         # (B, T, C, H, W)
+        x_2d = x_seq.reshape(B * T, C_in, H, W)    # (B*T, C, H, W)
 
-        # (B, 1, T, H, W) -> (B, T, 1, H, W)
-        x_seq = x3d.permute(0, 2, 1, 3, 4)
-        # Merge batch and time: (B*T, 1, H, W)
-        x_2d = x_seq.reshape(B * T, C_in, H, W)
-
-        # 2D CNN
         x_2d = F.relu(self.conv2d_1(x_2d))
         x_2d = self.pool2d(x_2d)
 
@@ -174,48 +136,50 @@ class Local2DTemporalBranch(nn.Module):
         x_2d = self.pool2d(x_2d)
         x_2d = self.dropout2d(x_2d)
 
-        # Initialize FC + LSTM lazily based on the CNN output shape
         if self.fc1 is None or self.lstm is None:
             C_out, H_out, W_out = x_2d.shape[1:]
             self._init_fc_and_lstm((C_out, H_out, W_out))
-            # Move newly created parameters to same device as x_2d
             self.fc1.to(x_2d.device)
             self.fc2.to(x_2d.device)
             self.lstm.to(x_2d.device)
 
-        # Flatten spatial dims
-        x_2d = x_2d.view(B * T, -1)            # (B*T, feat_dim)
-        x_2d = F.relu(self.fc1(x_2d))          # (B*T, 256)
-        x_2d = F.relu(self.fc2(x_2d))          # (B*T, 128)
+        x_2d = x_2d.view(B * T, -1)
+        x_2d = F.relu(self.fc1(x_2d))
+        x_2d = F.relu(self.fc2(x_2d))              # (B*T, 128)
 
-        # Restore time dimension: (B, T, 128)
-        x_seq_feat = x_2d.view(B, T, 128)
-
-        # LSTM over time
+        x_seq_feat = x_2d.view(B, T, 128)          # (B, T, 128)
         out, (h_n, c_n) = self.lstm(x_seq_feat)
-        # Use last hidden state as local feature: (B, lstm_hidden)
-        local_feat = h_n[-1]  # (num_layers * num_directions, B, hidden) -> (B, hidden)
-
+        local_feat = h_n[-1]                       # (B, hidden)
         return local_feat
 
 
 class CSIParallelCountNet(nn.Module):
     """
-    CSI-PCNH-style parallel network for user-count prediction.
+    STEM-like parallel network for user-count prediction.
 
-    Input: X of shape (B, 270, T)
-    Internally reshaped to (B, 1, T, 9, 30).
-    Output: logits for 6 classes (0..5 users).
+    Input: X of shape (B, C_in, T)
+    Internally reshaped to (B, 1, T, H, W) where H*W = C_in (or H=1, W=C_in).
     """
-    def __init__(self, num_classes=6, T_to_HW=(9, 30)):
+    def __init__(self, num_classes=6, in_channels=270, H: int = None, W: int = None):
         super().__init__()
         self.num_classes = num_classes
-        self.H, self.W = T_to_HW  # how we reshape 270 -> H*W
+        self.in_channels = in_channels
+
+        if H is not None and W is not None:
+            assert H * W == in_channels, "H * W must equal in_channels"
+            self.H, self.W = H, W
+        else:
+            # Default: try to use H=9 if possible; otherwise flatten into 1xC
+            if in_channels % 9 == 0:
+                self.H = 9
+                self.W = in_channels // 9
+            else:
+                self.H = 1
+                self.W = in_channels
 
         self.global_branch = Global3DBranch(in_channels=1)
         self.local_branch = Local2DTemporalBranch(in_channels=1, lstm_hidden=128)
 
-        # 256 from global branch + 128 from local branch
         self.fc = nn.Sequential(
             nn.Linear(256 + 128, 256),
             nn.ReLU(inplace=True),
@@ -224,98 +188,122 @@ class CSIParallelCountNet(nn.Module):
         )
 
     def forward(self, x):
-        """
-        x: (B, 270, T)
-        """
         B, C, T = x.shape
-        if C != self.H * self.W:
-            raise ValueError(
-                f"Expected C={self.H*self.W} (H*W), got {C}. "
-                "Adjust H,W in CSIParallelCountNet or reshape X differently."
-            )
+        if C != self.in_channels:
+            raise ValueError(f"Expected C={self.in_channels}, got {C}")
 
-        # Reshape to 3D conv input: (B, 1, T, H, W)
-        x_3d = x.view(B, 1, T, self.H, self.W)
+        x_3d = x.view(B, 1, T, self.H, self.W)  # (B,1,T,H,W)
 
-        g = self.global_branch(x_3d)   # (B, 256)
-        l = self.local_branch(x_3d)    # (B, 128)
+        g = self.global_branch(x_3d)            # (B,256)
+        l = self.local_branch(x_3d)             # (B,128)
 
-        z = torch.cat([g, l], dim=1)   # (B, 384)
-        logits = self.fc(z)            # (B, num_classes)
+        z = torch.cat([g, l], dim=1)            # (B,384)
+        logits = self.fc(z)                     # (B, num_classes)
         return logits
 
 
 # ============================================================
-# TRAIN / EVAL HELPERS
+# DATASET / DATALOADER SETUP (2 envs train+val, 1 env test)
 # ============================================================
 
-def get_dataloaders(
-    env_name: str,
-    use_band: str,
-    target_T: int,
-    downsample_factor: int,
-    batch_size: int,
+def get_dataloaders_two_envs(
+    train_envs,
+    test_env,
+    use_band,
+    target_T,
+    downsample_factor,
+    batch_size,
 ):
-    """
-    Build train/val/test DataLoaders for a given environment and band.
-    - env_name: one of the environments (e.g. "classroom") or "all"
-    """
     df_all = build_sample_table()
-    env_splits = split_by_environment(df_all)
 
-    if env_name == "all" or ENV_COL not in df_all.columns:
-        # Use the first (and only) split if no env info
-        key = list(env_splits.keys())[0]
-        base_train_df = env_splits[key]["train"]
-        test_df = env_splits[key]["test"]
+    if ENV_COL not in df_all.columns:
+        raise ValueError(f"ENV_COL '{ENV_COL}' not in annotations.csv")
+
+    # Train/val environments
+    df_trainval = df_all[df_all[ENV_COL].isin(train_envs)].reset_index(drop=True)
+    if df_trainval.empty:
+        raise ValueError(f"No samples found for train_envs={train_envs}")
+
+    # Test (unseen env)
+    df_test_meeting = df_all[df_all[ENV_COL] == test_env].reset_index(drop=True)
+    if df_test_meeting.empty:
+        print(f"[WARN] No samples found for TEST_ENV='{test_env}'.")
     else:
-        if env_name not in env_splits:
-            raise ValueError(
-                f"Environment '{env_name}' not found. Available: {list(env_splits.keys())}"
-            )
-        base_train_df = env_splits[env_name]["train"]
-        test_df = env_splits[env_name]["test"]
+        print(f"[INFO] Meeting-room (unseen) samples: {len(df_test_meeting)}")
 
-    # Further split base_train_df into train / val
+    # Band filtering
+    if use_band is not None:
+        target_val = float(use_band)
+        band_trainval = pd.to_numeric(df_trainval[BAND_COL], errors="coerce")
+        mask_tv = np.isclose(band_trainval, target_val)
+        df_trainval = df_trainval[mask_tv].reset_index(drop=True)
+
+        band_test = pd.to_numeric(df_test_meeting[BAND_COL], errors="coerce")
+        mask_te = np.isclose(band_test, target_val)
+        df_test_meeting = df_test_meeting[mask_te].reset_index(drop=True)
+
+        print(
+            f"[INFO] After band filter wifi_band≈{target_val}: "
+            f"{len(df_trainval)} train+val samples, "
+            f"{len(df_test_meeting)} meeting_room samples"
+        )
+
+    # Train/val split
     train_df, val_df = train_test_split(
-        base_train_df,
+        df_trainval,
         test_size=0.2,
         random_state=123,
-        stratify=base_train_df["num_users"],
+        stratify=df_trainval["num_users"],
+    )
+    print(
+        f"[INFO] Train+Val from envs={train_envs}: "
+        f"{len(train_df)} train, {len(val_df)} val samples"
     )
 
+    # Use DWT + Doppler here
     train_ds = WiMANSCountDataset(
         train_df,
         target_T=target_T,
         downsample_factor=downsample_factor,
-        use_band=use_band,
+        use_band=None,        # band already filtered
+        use_dwt=True,
+        use_doppler=True,
     )
     val_ds = WiMANSCountDataset(
         val_df,
         target_T=target_T,
         downsample_factor=downsample_factor,
-        use_band=use_band,
+        use_band=None,
+        use_dwt=True,
+        use_doppler=True,
     )
-    test_ds = WiMANSCountDataset(
-        test_df,
+    test_meeting_ds = WiMANSCountDataset(
+        df_test_meeting,
         target_T=target_T,
         downsample_factor=downsample_factor,
-        use_band=use_band,
+        use_band=None,
+        use_dwt=True,
+        use_doppler=True,
     )
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=4)
+    test_meeting_loader = DataLoader(test_meeting_ds, batch_size=batch_size, shuffle=False, num_workers=4)
 
-    print(f"[INFO] Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+    print(f"[INFO] Training DataLoader: {len(train_ds)} samples")
+    print(f"[INFO] Validation DataLoader: {len(val_ds)} samples")
+    print(f"[INFO] Meeting-room Test DataLoader: {len(test_meeting_ds)} samples")
 
-    # Infer T_proc from one batch (after downsampling)
+    # Inspect shape after full preprocessing
     X_example, _ = next(iter(train_loader))
-    _, C, T_proc = X_example.shape
-    print(f"[INFO] Example batch X shape: {X_example.shape} (C={C}, T={T_proc})")
+    print(f"[INFO] Example batch X shape: {X_example.shape}")  # (B, C_in, T_proc)
 
-    return train_loader, val_loader, test_loader, T_proc
+    return train_loader, val_loader, test_meeting_loader
 
+
+# ============================================================
+# TRAIN / EVAL UTILITIES
+# ============================================================
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
@@ -323,8 +311,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     correct = 0
     total = 0
 
-    for i, (X, y) in enumerate(loader):
-        X = X.to(device)  # (B, C, T)
+    for X, y in tqdm(loader, desc="Train", leave=False):
+        X = X.to(device)
         y = y.to(device)
 
         optimizer.zero_grad()
@@ -335,20 +323,16 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
         optimizer.step()
 
         running_loss += loss.item() * X.size(0)
-
         preds = logits.argmax(dim=1)
         correct += (preds == y).sum().item()
         total += y.size(0)
-
-        if (i + 1) % PRINT_EVERY == 0:
-            print(f"  [batch {i+1}/{len(loader)}] loss={loss.item():.4f}")
 
     epoch_loss = running_loss / total
     epoch_acc = correct / total
     return epoch_loss, epoch_acc
 
 
-def eval_model(model, loader, criterion, device):
+def eval_model(model, loader, criterion, device, desc="Eval"):
     model.eval()
     running_loss = 0.0
     correct = 0
@@ -358,7 +342,7 @@ def eval_model(model, loader, criterion, device):
     all_labels = []
 
     with torch.no_grad():
-        for X, y in loader:
+        for X, y in tqdm(loader, desc=desc, leave=False):
             X = X.to(device)
             y = y.to(device)
 
@@ -366,18 +350,23 @@ def eval_model(model, loader, criterion, device):
             loss = criterion(logits, y)
 
             running_loss += loss.item() * X.size(0)
-
             preds = logits.argmax(dim=1)
+
             correct += (preds == y).sum().item()
             total += y.size(0)
 
             all_preds.append(preds.cpu().numpy())
             all_labels.append(y.cpu().numpy())
 
-    epoch_loss = running_loss / total
-    epoch_acc = correct / total
-    all_preds = np.concatenate(all_preds)
-    all_labels = np.concatenate(all_labels)
+    epoch_loss = running_loss / total if total > 0 else 0.0
+    epoch_acc = correct / total if total > 0 else 0.0
+
+    if all_preds:
+        all_preds = np.concatenate(all_preds)
+        all_labels = np.concatenate(all_labels)
+    else:
+        all_preds = np.array([])
+        all_labels = np.array([])
 
     return epoch_loss, epoch_acc, all_preds, all_labels
 
@@ -389,22 +378,29 @@ def eval_model(model, loader, criterion, device):
 def main():
     print(f"Using device: {DEVICE}")
 
-    # Data
-    train_loader, val_loader, test_loader, T_proc = get_dataloaders(
-        env_name=ENV_NAME,
+    train_loader, val_loader, test_meeting_loader = get_dataloaders_two_envs(
+        train_envs=TRAIN_ENVS,
+        test_env=TEST_ENV,
         use_band=USE_BAND,
         target_T=TARGET_T,
         downsample_factor=DOWNSAMPLE_FACTOR,
         batch_size=BATCH_SIZE,
     )
 
-    # Model (we know C=270; we use H=9, W=30 -> 9*30 = 270)
-    model = CSIParallelCountNet(num_classes=NUM_CLASSES, T_to_HW=(9, 30)).to(DEVICE)
+    # Infer number of channels after full preprocessing
+    X_example, _ = next(iter(train_loader))
+    C_in = X_example.shape[1]
+    print(f"[INFO] Model input channels (C_in): {C_in}")
+
+    # Model
+    model = CSIParallelCountNet(num_classes=NUM_CLASSES, in_channels=C_in).to(DEVICE)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
         model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
     )
 
+    patience = 5
+    patience_counter = 0
     best_val_acc = 0.0
     best_state = None
 
@@ -414,35 +410,44 @@ def main():
             model, train_loader, criterion, optimizer, DEVICE
         )
         val_loss, val_acc, _, _ = eval_model(
-            model, val_loader, criterion, DEVICE
+            model, val_loader, criterion, DEVICE, desc="Val"
         )
 
         print(
             f"Train: loss={train_loss:.4f}, acc={train_acc:.4f} | "
-            f"Val: loss={val_loss:.4f}, acc={val_acc:.4f}"
+            f"Val (empty_room+classroom): loss={val_loss:.4f}, acc={val_acc:.4f}"
         )
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_state = model.state_dict()
+            patience_counter = 0
             print(f"[INFO] New best val acc: {best_val_acc:.4f}")
+        else:
+            patience_counter += 1
+            print(f"[INFO] No improvement for {patience_counter} epochs.")
 
-    # Load best model
+        if patience_counter >= patience:
+            print(f"[EARLY STOP] Validation accuracy has not improved for {patience} epochs.")
+            break
+
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    # Final evaluation on test set
     test_loss, test_acc, test_preds, test_labels = eval_model(
-        model, test_loader, criterion, DEVICE
+        model, test_meeting_loader, criterion, DEVICE, desc="Test (meeting_room)"
     )
-    print("\n=== Test Results ===")
+
+    print("\n=== Unseen Environment Test: meeting_room ===")
     print(f"Test loss={test_loss:.4f}, Test acc={test_acc:.4f}")
+    if test_labels.size > 0:
+        print("\nConfusion Matrix (rows=true, cols=pred):")
+        print(confusion_matrix(test_labels, test_preds))
 
-    print("\nConfusion Matrix (rows=true, cols=pred):")
-    print(confusion_matrix(test_labels, test_preds))
-
-    print("\nClassification Report:")
-    print(classification_report(test_labels, test_preds, digits=4))
+        print("\nClassification Report:")
+        print(classification_report(test_labels, test_preds, digits=4))
+    else:
+        print("[WARN] No meeting_room samples in test set.")
 
 
 if __name__ == "__main__":
