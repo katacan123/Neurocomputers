@@ -404,33 +404,39 @@ def main():
     best_val_acc = 0.0
     best_state = None
 
-    for epoch in range(1, EPOCHS + 1):
-        print(f"\n=== Epoch {epoch}/{EPOCHS} ===")
-        train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, DEVICE
-        )
-        val_loss, val_acc, _, _ = eval_model(
-            model, val_loader, criterion, DEVICE, desc="Val"
-        )
+    try:
+        for epoch in range(1, EPOCHS + 1):
+            print(f"\n=== Epoch {epoch}/{EPOCHS} ===")
+            train_loss, train_acc = train_one_epoch(
+                model, train_loader, criterion, optimizer, DEVICE
+            )
+            val_loss, val_acc, _, _ = eval_model(
+                model, val_loader, criterion, DEVICE, desc="Val"
+            )
 
-        print(
-            f"Train: loss={train_loss:.4f}, acc={train_acc:.4f} | "
-            f"Val (empty_room+classroom): loss={val_loss:.4f}, acc={val_acc:.4f}"
-        )
+            print(
+                f"Train: loss={train_loss:.4f}, acc={train_acc:.4f} | "
+                f"Val (empty_room+classroom): loss={val_loss:.4f}, acc={val_acc:.4f}"
+            )
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            best_state = model.state_dict()
-            patience_counter = 0
-            print(f"[INFO] New best val acc: {best_val_acc:.4f}")
-        else:
-            patience_counter += 1
-            print(f"[INFO] No improvement for {patience_counter} epochs.")
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                best_state = model.state_dict()
+                patience_counter = 0
+                print(f"[INFO] New best val acc: {best_val_acc:.4f}")
+            else:
+                patience_counter += 1
+                print(f"[INFO] No improvement for {patience_counter} epochs.")
 
-        if patience_counter >= patience:
-            print(f"[EARLY STOP] Validation accuracy has not improved for {patience} epochs.")
-            break
+            # Early stopping
+            if patience_counter >= patience:
+                print(f"[EARLY STOP] Validation accuracy has not improved for {patience} epochs.")
+                break
 
+    except KeyboardInterrupt:
+        print("\n[INTERRUPT] KeyboardInterrupt received. "
+              "Stopping training early and proceeding to test evaluation...")
+        
     if best_state is not None:
         model.load_state_dict(best_state)
 
