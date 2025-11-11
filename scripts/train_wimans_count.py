@@ -20,6 +20,11 @@ from wimans_preprocess import (
     BAND_COL,
 )
 
+from torch.amp import autocast      # keep autocast from here
+from torch.amp import GradScaler         # GradScaler from new namespace
+import torch.nn.functional as F
+
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -27,7 +32,7 @@ from wimans_preprocess import (
 TRAIN_ENVS = ("empty_room", "classroom")
 TEST_ENV = "meeting_room"       # unseen test environment
 
-USE_BAND = "5"                  # "2.4", "5" or None
+USE_BAND = None                  # "2.4", "5" or None
 
 TARGET_T = 3000
 DOWNSAMPLE_FACTOR = 2
@@ -305,24 +310,42 @@ def get_dataloaders_two_envs(
 # TRAIN / EVAL UTILITIES
 # ============================================================
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
+
+    use_amp = (device == "cuda") and (scaler is not None)
 
     for X, y in tqdm(loader, desc="Train", leave=False):
         X = X.to(device)
         y = y.to(device)
 
         optimizer.zero_grad()
-        logits = model(X)
-        loss = criterion(logits, y)
 
-        loss.backward()
-        optimizer.step()
+        # ---- Forward + loss with mixed precision ----
+        if use_amp:
+            with autocast(device_type="cuda", dtype=torch.float16):
+                logits = model(X)
+                loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.2)
+        else:
+            logits = model(X)
+            loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.2)
+
+        # ---- Backward + optimizer step ----
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         running_loss += loss.item() * X.size(0)
+
+        # NOTE: this acc only makes sense if you're using classification (CrossEntropy).
+        # If you're using MSELoss/regression, you may want a different metric here.
         preds = logits.argmax(dim=1)
         correct += (preds == y).sum().item()
         total += y.size(0)
@@ -330,6 +353,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     epoch_loss = running_loss / total
     epoch_acc = correct / total
     return epoch_loss, epoch_acc
+
 
 
 def eval_model(model, loader, criterion, device, desc="Eval"):
@@ -347,7 +371,7 @@ def eval_model(model, loader, criterion, device, desc="Eval"):
             y = y.to(device)
 
             logits = model(X)
-            loss = criterion(logits, y)
+            loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.2)
 
             running_loss += loss.item() * X.size(0)
             preds = logits.argmax(dim=1)
@@ -370,6 +394,35 @@ def eval_model(model, loader, criterion, device, desc="Eval"):
 
     return epoch_loss, epoch_acc, all_preds, all_labels
 
+def distance_aware_loss(logits, targets, alpha=1.0, beta=0.2):
+    """
+    logits: (B, num_classes)
+    targets: (B,) integer labels in [0, num_classes-1]
+    alpha: weight for cross-entropy part
+    beta:  weight for distance-aware regression part
+    """
+    # 1) Standard cross-entropy on logits + integer labels
+    ce = F.cross_entropy(logits, targets)
+
+    # 2) Distance-aware term on expected count
+    num_classes = logits.size(1)
+    device = logits.device
+
+    # class indices: [0,1,2,3,4,5]
+    class_indices = torch.arange(num_classes, device=device, dtype=torch.float32)
+
+    # probabilities via softmax
+    probs = F.softmax(logits, dim=1)                  # (B, C)
+
+    # expected predicted count: sum_k p_k * k
+    pred_count = (probs * class_indices.unsqueeze(0)).sum(dim=1)  # (B,)
+
+    # true count as float
+    true_count = targets.to(torch.float32)            # (B,)
+
+    mse = F.mse_loss(pred_count, true_count)          # scalar
+
+    return alpha * ce + beta * mse
 
 # ============================================================
 # MAIN
@@ -394,10 +447,16 @@ def main():
 
     # Model
     model = CSIParallelCountNet(num_classes=NUM_CLASSES, in_channels=C_in).to(DEVICE)
-    criterion = nn.CrossEntropyLoss()
+    #criterion = nn.CrossEntropyLoss()
+    #criterion = nn.MSELoss()
+    criterion = None
     optimizer = torch.optim.Adam(
         model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
     )
+
+    # ---- ADD THIS: GradScaler for mixed precision ----
+    scaler = GradScaler("cuda") if DEVICE == "cuda" else None
+
 
     patience = 5
     patience_counter = 0
@@ -408,7 +467,7 @@ def main():
         for epoch in range(1, EPOCHS + 1):
             print(f"\n=== Epoch {epoch}/{EPOCHS} ===")
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, DEVICE
+                model, train_loader, criterion, optimizer, DEVICE, scaler=scaler
             )
             val_loss, val_acc, _, _ = eval_model(
                 model, val_loader, criterion, DEVICE, desc="Val"
