@@ -45,6 +45,17 @@ NUM_CLASSES = 6
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# Where to save checkpoints
+CHECKPOINT_DIR = Path("checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+LAST_CHECKPOINT = CHECKPOINT_DIR / "wimans_last.pt"
+BEST_CHECKPOINT = CHECKPOINT_DIR / "wimans_best.pt"
+
+# Toggle this to False if you want to ignore an existing checkpoint and start fresh
+RESUME_FROM_LAST = True
+
+
 
 # ============================================================
 # MODEL (3D CNN + CAM + 2D CNN + LSTM)
@@ -454,17 +465,43 @@ def main():
         model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
     )
 
-    # ---- ADD THIS: GradScaler for mixed precision ----
+    # ---- GradScaler for mixed precision ----
     scaler = GradScaler("cuda") if DEVICE == "cuda" else None
 
-
+    # ---- Early stopping + checkpoint resume state ----
     patience = 5
     patience_counter = 0
     best_val_acc = 0.0
-    best_state = None
+    start_epoch = 1
 
+    # ======== RESUME FROM LAST CHECKPOINT (if enabled) ========
+    if RESUME_FROM_LAST and LAST_CHECKPOINT.exists():
+        print(f"[RESUME] Loading checkpoint from {LAST_CHECKPOINT}")
+        ckpt = torch.load(LAST_CHECKPOINT, map_location=DEVICE)
+
+        model.load_state_dict(ckpt["model_state"])
+        optimizer.load_state_dict(ckpt["optimizer_state"])
+
+        if scaler is not None and ckpt.get("scaler_state") is not None:
+            scaler.load_state_dict(ckpt["scaler_state"])
+
+        start_epoch = ckpt["epoch"] + 1
+        best_val_acc = ckpt.get("best_val_acc", 0.0)
+        patience_counter = ckpt.get("patience_counter", 0)
+
+        print(
+            f"[RESUME] Resuming from epoch {start_epoch} "
+            f"(best_val_acc={best_val_acc:.4f}, "
+            f"patience_counter={patience_counter})"
+        )
+    else:
+        print("[RESUME] No checkpoint found or resume disabled; starting from scratch.")
+
+    # ============================================================
+    # TRAINING LOOP
+    # ============================================================
     try:
-        for epoch in range(1, EPOCHS + 1):
+        for epoch in range(start_epoch, EPOCHS + 1):
             print(f"\n=== Epoch {epoch}/{EPOCHS} ===")
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion, optimizer, DEVICE, scaler=scaler
@@ -478,14 +515,38 @@ def main():
                 f"Val (empty_room+classroom): loss={val_loss:.4f}, acc={val_acc:.4f}"
             )
 
+            # ---------- Update best & patience ----------
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                best_state = model.state_dict()
                 patience_counter = 0
                 print(f"[INFO] New best val acc: {best_val_acc:.4f}")
+
+                # Save BEST checkpoint
+                best_ckpt = {
+                    "epoch": epoch,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scaler_state": scaler.state_dict() if scaler is not None else None,
+                    "best_val_acc": best_val_acc,
+                    "patience_counter": patience_counter,
+                }
+                torch.save(best_ckpt, BEST_CHECKPOINT)
+                print(f"[CKPT] Saved BEST checkpoint to {BEST_CHECKPOINT}")
             else:
                 patience_counter += 1
                 print(f"[INFO] No improvement for {patience_counter} epochs.")
+
+            # Save LAST checkpoint every epoch (for resume)
+            last_ckpt = {
+                "epoch": epoch,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scaler_state": scaler.state_dict() if scaler is not None else None,
+                "best_val_acc": best_val_acc,
+                "patience_counter": patience_counter,
+            }
+            torch.save(last_ckpt, LAST_CHECKPOINT)
+            print(f"[CKPT] Saved LAST checkpoint to {LAST_CHECKPOINT}")
 
             # Early stopping
             if patience_counter >= patience:
@@ -495,10 +556,20 @@ def main():
     except KeyboardInterrupt:
         print("\n[INTERRUPT] KeyboardInterrupt received. "
               "Stopping training early and proceeding to test evaluation...")
-        
-    if best_state is not None:
-        model.load_state_dict(best_state)
 
+    # ============================================================
+    # LOAD BEST CHECKPOINT FOR TESTING
+    # ============================================================
+    if BEST_CHECKPOINT.exists():
+        print(f"[INFO] Loading BEST checkpoint from {BEST_CHECKPOINT} for test evaluation.")
+        best_ckpt = torch.load(BEST_CHECKPOINT, map_location=DEVICE)
+        model.load_state_dict(best_ckpt["model_state"])
+    else:
+        print("[WARN] BEST_CHECKPOINT not found; using current model weights for test.")
+
+    # ============================================================
+    # TEST ON UNSEEN ENVIRONMENT
+    # ============================================================
     test_loss, test_acc, test_preds, test_labels = eval_model(
         model, test_meeting_loader, criterion, DEVICE, desc="Test (meeting_room)"
     )
@@ -517,3 +588,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
