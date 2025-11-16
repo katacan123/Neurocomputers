@@ -1,0 +1,38 @@
+# configs/base_wimans.yaml
+
+data:
+  dataset_root: "./training_dataset"
+  annotation_csv: "./training_dataset/annotation.csv"
+  csi_amp_root: "./training_dataset/wifi_csi/amp"
+  preprocessed_dir: "./training_dataset/preprocessed"
+
+  # environment split
+  env_train: ["empty_room", "classroom"]
+  env_test: "meeting_room"    # unseen env for test
+
+  band: 5.0          # GHz (if you later want to filter by band)
+  T: 3000            # target time length
+
+model:
+  in_channels: 270   # 3 x 3 x 30
+  num_classes: 54    # 6 users x 9 activity classes
+  gru_hidden: 256
+
+train:
+  batch_size: 64
+  lr: 0.001
+  epochs: 200
+  weight_decay: 0.0
+  device: "cuda"
+  patience: 20
+  min_delta: 0.0001
+  val_target: null
+
+aokd:
+  temperature: 2.0
+  beta: 0.0
+
+preprocess:
+  alpha: 1.0        # placeholder scaling params (tune later)
+  noise_power: 1.0
+  C_tx: 1.0
