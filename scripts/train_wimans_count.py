@@ -339,10 +339,10 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None):
         if use_amp:
             with autocast(device_type="cuda", dtype=torch.float16):
                 logits = model(X)
-                loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.2)
+                loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.4)
         else:
             logits = model(X)
-            loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.2)
+            loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.4)
 
         # ---- Backward + optimizer step ----
         if use_amp:
@@ -382,7 +382,7 @@ def eval_model(model, loader, criterion, device, desc="Eval"):
             y = y.to(device)
 
             logits = model(X)
-            loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.2)
+            loss = distance_aware_loss(logits, y, alpha=1.0, beta=0.4)
 
             running_loss += loss.item() * X.size(0)
             preds = logits.argmax(dim=1)
