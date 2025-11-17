@@ -107,6 +107,9 @@ def compute_static_average(
     annotation_csv: str | Path,
     csi_amp_root: str | Path,
     T_target: int,
+    alpha: float,
+    noise_power: float,
+    C_tx: float,
 ) -> Dict[Tuple[str, float], np.ndarray]:
     """
     Compute H_AVGS per (environment, wifi_band) using 0-user samples.
@@ -160,7 +163,8 @@ def compute_static_average(
         for sid in sids:
             C_raw = load_csi_amp(sid, csi_amp_root)
             C_norm = normalize_time_axis(C_raw, T_target)
-            accum.append(C_norm)
+            C_scaled = scale_csi(C_norm, alpha=alpha, noise_power=noise_power, C_tx=C_tx)
+            accum.append(C_scaled)
 
         static_avgs[key] = np.mean(np.stack(accum, axis=0), axis=0)
 

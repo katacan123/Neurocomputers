@@ -1,0 +1,1 @@
+python -m eval.eval_wimuar --config configs/base_wimans.yaml --checkpoint runs/wimans_hstnn/checkpoints/best_model.pt --run_name wimans_hstnn_test

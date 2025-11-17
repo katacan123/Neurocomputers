@@ -63,6 +63,9 @@ def main():
     csi_amp_root = cfg["data"]["csi_amp_root"]
     preprocessed_dir = cfg["data"]["preprocessed_dir"]
     T_target = cfg["data"]["T"]
+    alpha = cfg["preprocess"]["alpha"]
+    noise_power = cfg["preprocess"]["noise_power"]
+    C_tx = cfg["preprocess"]["C_tx"]
 
     env_train = tuple(cfg["data"]["env_train"])
     test_env = cfg["data"]["env_test"]
@@ -89,10 +92,13 @@ def main():
     )
     logger.info("Computing static averages H_AVGS per (env, band) for eval...")
     H_avgs_dict = compute_static_average(
-        sample_ids=all_ids_for_static,
+        sample_ids=split_ids["test_ids"],
         annotation_csv=annotation_csv,
         csi_amp_root=csi_amp_root,
         T_target=T_target,
+        alpha=alpha,
+        noise_power=noise_power,
+        C_tx=C_tx,
     )
 
     alpha = cfg["preprocess"]["alpha"]

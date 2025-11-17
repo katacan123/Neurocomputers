@@ -19,7 +19,7 @@ model:
   gru_hidden: 256
 
 train:
-  batch_size: 64
+  batch_size: 32
   lr: 0.001
   epochs: 200
   weight_decay: 0.0
@@ -30,9 +30,10 @@ train:
 
 aokd:
   temperature: 2.0
-  beta: 0.0
+  beta: 0.5
 
 preprocess:
-  alpha: 1.0        # placeholder scaling params (tune later)
+  alpha: 4.5        # placeholder scaling params (tune later)
   noise_power: 1.0
   C_tx: 1.0
+  T_target: 3000 

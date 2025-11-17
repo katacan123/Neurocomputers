@@ -26,6 +26,8 @@ from utils.metrics import (
 )
 
 from data.wimans_dataset import WiMansActivityDataset, ACTIVITIES
+import pandas as pd
+import numpy as np
 
 
 
@@ -89,25 +91,25 @@ def main():
     )
 
     # ------------------ Static averages (H_AVGS) ------------------
-    all_ids_for_static = (
-        split_ids["train_ids"]
-        + split_ids["val_ids"]
-        + split_ids["test_ids"]
-    )
+
+    alpha = cfg["preprocess"]["alpha"]
+    noise_power = cfg["preprocess"]["noise_power"]
+    C_tx = cfg["preprocess"]["C_tx"]
+    T_target = cfg["preprocess"]["T_target"]
 
     logger.info("Computing static averages H_AVGS per (env, band)...")
     H_avgs_dict = compute_static_average(
-        sample_ids=all_ids_for_static,
+        sample_ids=split_ids["train_ids"] + split_ids["val_ids"],
         annotation_csv=annotation_csv,
         csi_amp_root=csi_amp_root,
         T_target=T_target,
+        alpha=alpha,
+        noise_power=noise_power,
+        C_tx=C_tx,
     )
     logger.info(f"Computed static averages for {len(H_avgs_dict)} (env, band) pairs")
 
     # ------------------ Datasets & Loaders ------------------
-    alpha = cfg["preprocess"]["alpha"]
-    noise_power = cfg["preprocess"]["noise_power"]
-    C_tx = cfg["preprocess"]["C_tx"]
 
     ds_train = WiMansActivityDataset(
         annotation_csv=annotation_csv,
@@ -138,8 +140,11 @@ def main():
     # Using your sanity-check stats: mean(y) ≈ 0.0483
     # pos_weight ~= (1 - p) / p  -> about 19.7
     num_classes = cfg["model"]["num_classes"]
-    base_pos_weight = (1.0 - 0.0483) / 0.0483  # ~19.7
+    #base_pos_weight = (1.0 - 0.0483) / 0.0483  # ~19.7
+    #pos_weight = torch.full((num_classes,), base_pos_weight, dtype=torch.float32)
+    base_pos_weight = 8.0   # gentler than 19.7
     pos_weight = torch.full((num_classes,), base_pos_weight, dtype=torch.float32)
+
     logger.info(
         f"Using constant pos_weight={base_pos_weight:.2f} for all {num_classes} classes"
     )
@@ -168,10 +173,28 @@ def main():
         num_classes=cfg["model"]["num_classes"],
         gru_hidden=cfg["model"]["gru_hidden"],
         num_teachers=2,
-        dropout_p=0.5,
+        dropout_p=0.3,
     ).to(device)
 
-    pos_weight = pos_weight.to(device)
+
+    df = pd.read_csv(annotation_csv)
+    
+    Y_list = []
+    for sid in split_ids["train_ids"]:
+        row = df[df["label"] == sid].iloc[0]
+        y_6x9 = WiMansActivityDataset._build_y_6x9(ds_train, row)  # or factor it into a helper
+        Y_list.append(y_6x9.reshape(-1))
+
+    Y = np.stack(Y_list, axis=0)       # (N_train, 54)
+    pos = Y.sum(axis=0)                # (54,)
+    neg = Y.shape[0] - pos
+    eps = 1e-3
+    pos_weight_vec = neg / (pos + eps) # (54,)
+
+    # clamp to avoid insane weights
+    pos_weight_vec = np.clip(pos_weight_vec, 1.0, 20.0)
+
+    pos_weight = torch.from_numpy(pos_weight_vec.astype(np.float32)).to(device)
 
     criterion = AOKDLoss(
         temperature=cfg["aokd"]["temperature"],
@@ -229,18 +252,10 @@ def main():
             all_pred_counts, all_true_counts = [], []
 
             with torch.no_grad():
-                first = True
                 for x, y_act, y_count, meta in dl_val:
                     x = x.to(device)
                     y_act = y_act.to(device)
                     y_count = y_count.to(device)
-                    if first:
-                        # DEBUG: Are there any positives in the labels?
-                        print("DEBUG y_act: mean over all labels:", y_act.mean().item())
-                        print("DEBUG y_act: avg number of 1s per sample:",
-                            y_act.sum(dim=1).mean().item())
-                        first = False
-
 
                     student_logits, teacher_logits_list = model(x)
                     loss = criterion(student_logits, teacher_logits_list, y_act)
@@ -372,7 +387,7 @@ def main():
 
 
             # activities -> 6x9 matrix
-            pred_6x9 = logits_to_activity_matrix(student_logits, threshold=0.3) # (B, 6, 9)
+            pred_6x9 = logits_to_activity_matrix(student_logits, threshold=0.5) # (B, 6, 9)
             true_6x9 = y_act.view(-1, 6, len(ACTIVITIES))         # (B, 6, 9)
 
             # derived counts from predicted activities
