@@ -1,0 +1,43 @@
+# configs/wimans_5g_pp.yaml
+
+data:
+  dataset_root: "training_dataset"
+  split_csv: "training_dataset/processed_5g_pp/splits_5g_pp.csv"
+  target_T: 3000
+  max_users: 5
+
+model:
+  in_channels: 270
+  num_classes_activity: 9
+  max_users: 5
+
+  backbone:
+    base_channels: 32
+    k1: 128
+    k2: 64
+    k3: 32
+    s1: 8
+    s2: 4
+    s3: 2
+    deep_unfold_K: 5
+
+  attention:
+    num_heads: 2
+    num_layers: 3
+
+train:
+  epochs: 200
+  batch_size: 128
+  lr: 1e-3
+  weight_decay: 1e-4
+  num_workers: 4
+  pin_memory: true
+
+  amp: true
+  patience: 20
+
+  ckpt_dir: "experiments/wimans_5g_pp"
+  log_dir: "experiments/wimans_5g_pp/logs"
+
+  act_nothing_class: 0
+  count_threshold: 0.6
