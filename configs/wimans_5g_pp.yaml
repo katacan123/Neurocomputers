@@ -39,7 +39,7 @@ train:
   log_dir: "experiments/wimans_5g_pp/logs"
 
   act_nothing_class: 0
-  count_threshold: 0.6
+  count_threshold: 0.5
 
   # NEW: multi-task loss weights (paper does not specify non-unit)
   loss_weights:
