@@ -13,16 +13,59 @@ import torch
 
 def load_csi_mat(path: Path, key: str = "csi") -> np.ndarray:
     """
-    Load raw WiMANS CSI .mat file.
-    Expected shape: (T, 3, 3, 30).
+    Load CSI from a WiMANS .mat file.
+
+    Two possible formats:
+
+    1) Top-level 'csi' variable: csi.shape == (T, 3, 3, 30)
+    2) Intel 5300-like 'trace' array of structs:
+         mat['trace'] is (T,) object array
+         mat['trace'][i].csi is (3, 3, 30) complex
+
+    This function handles both and returns:
+      csi: (T, 3, 3, 30) as a **real** numpy array (amplitude).
     """
-    mat = loadmat(path)
-    if key not in mat:
-        raise KeyError(f"Key '{key}' not found in {path}. Available keys: {list(mat.keys())}")
-    csi = mat[key]
-    if csi.ndim != 4:
-        raise ValueError(f"Expected CSI with 4 dims (T, 3, 3, 30), got shape {csi.shape}")
-    return csi
+    mat = loadmat(path, squeeze_me=True, struct_as_record=False)
+
+    # Case 1: direct 'csi' variable
+    if key in mat:
+        csi = mat[key]
+        # Ensure temporal dimension is first
+        if csi.ndim == 3 and csi.shape == (3, 3, 30):
+            csi = csi[np.newaxis, ...]  # (1, 3, 3, 30)
+        elif csi.ndim != 4:
+            raise ValueError(f"Unexpected 'csi' shape {csi.shape} in {path}")
+    # Case 2: WiMANS / Intel 5300 format with 'trace' struct array
+    elif "trace" in mat:
+        trace = mat["trace"]  # (T,) array of mat_struct
+        # make sure it's 1D
+        trace = np.atleast_1d(trace)
+        T = trace.shape[0]
+        csi_list = []
+        for i in range(T):
+            rec = trace[i]
+            if not hasattr(rec, "csi"):
+                raise ValueError(f"'trace[{i}]' has no 'csi' field in {path}")
+            cs = rec.csi  # expected (3, 3, 30)
+            cs = np.asarray(cs)
+            if cs.ndim == 3:
+                csi_list.append(cs[np.newaxis, ...])  # (1, 3, 3, 30)
+            elif cs.ndim == 4 and cs.shape[0] == 1:
+                csi_list.append(cs)  # already (1, 3, 3, 30)
+            else:
+                raise ValueError(f"Unexpected 'trace[{i}].csi' shape {cs.shape} in {path}")
+        csi = np.concatenate(csi_list, axis=0)  # (T, 3, 3, 30)
+    else:
+        raise KeyError(
+            f"Neither key '{key}' nor 'trace' found in {path}. "
+            f"Available keys: {list(mat.keys())}"
+        )
+
+    # Convert complex CSI to amplitude (real)
+    if np.iscomplexobj(csi):
+        csi = np.abs(csi)
+
+    return csi  # (T, 3, 3, 30)
 
 
 def reshape_csi(csi: np.ndarray) -> np.ndarray:

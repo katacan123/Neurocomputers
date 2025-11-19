@@ -83,7 +83,7 @@ def main():
         torch.save(x, tensor_path)
 
         label_info = build_sample_labels(
-            raw_row=row,
+            row=row,
             max_users=args.max_users
         )
 

@@ -1,4 +1,4 @@
-python scripts/preprocess_wimans.py --dataset_root training_dataset --band 5.0 --target_T 3000 --max_users 5 --use_wavelet_pp --out_dir training_dataset/processed_5g_pp --csi_key csi
+python scripts/preprocess_wimans.py --dataset_root training_dataset --band 5.0 --target_T 3000 --max_users 5 --use_wavelet_pp --out_dir training_dataset/processed_5g_pp
 
 python scripts/build_splits.py --metadata_csv training_dataset/processed_5g_pp/metadata.csv --out_csv training_dataset/processed_5g_pp/splits_5g_pp.csv --train_envs classroom empty_room --val_envs classroom empty_room --test_envs meeting_room --val_ratio 0.2
 
