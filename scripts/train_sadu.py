@@ -11,7 +11,8 @@ import yaml
 from torch.amp import GradScaler
 from torch.utils.tensorboard import SummaryWriter
 
-from models.sadu import SADUWiMANS
+from models.sadu_full import SADUWiMANSFull as SADUWiMANS
+
 from wimans.dataset import build_dataloaders
 from training.loop import train_one_epoch, eval_one_epoch
 
@@ -74,6 +75,10 @@ def main():
     patience = cfg["train"]["patience"]
     num_epochs = cfg["train"]["epochs"]
 
+    loss_weights = cfg["train"].get("loss_weights", None)
+    ignore_index_id = cfg["train"].get("ignore_index_id", -1)
+    ignore_index_loc = cfg["train"].get("ignore_index_loc", -1)
+
     for epoch in range(1, num_epochs + 1):
         print(f"\n[Epoch {epoch}/{num_epochs}] (SADU)")
 
@@ -85,13 +90,19 @@ def main():
             scaler=scaler,
             act_nothing_class=act_nothing_class,
             count_threshold=count_threshold,
+            loss_weights=loss_weights,
+            ignore_index_id=ignore_index_id,
+            ignore_index_loc=ignore_index_loc,
         )
 
         print(
-            f"  Train: loss={train_stats['loss']:.4f}, "
-            f"act_acc={train_stats['act_acc']:.4f}, "
-            f"count_acc={train_stats['count_acc']:.4f}, "
-            f"count_mae={train_stats['count_mae']:.4f}"
+            f"  Train: "
+            f"loss={train_stats['loss_total']:.4f}, "
+            f"act_acc={train_stats['act_acc']:.3f}, "
+            f"loc_acc={train_stats['loc_acc']:.3f}, "
+            f"id_acc={train_stats['id_acc']:.3f}, "
+            f"count_acc={train_stats['count_acc']:.3f}, "
+            f"MAE={train_stats['count_mae']:.3f}"
         )
 
         writer.add_scalar("train/loss", train_stats["loss"], epoch)
@@ -105,13 +116,19 @@ def main():
             device=device,
             act_nothing_class=act_nothing_class,
             count_threshold=count_threshold,
+            loss_weights=loss_weights,
+            ignore_index_id=ignore_index_id,
+            ignore_index_loc=ignore_index_loc,
         )
 
         print(
-            f"  Val:   loss={val_stats['loss']:.4f}, "
-            f"act_acc={val_stats['act_acc']:.4f}, "
-            f"count_acc={val_stats['count_acc']:.4f}, "
-            f"count_mae={val_stats['count_mae']:.4f}"
+            f"  Val:   "
+            f"loss={val_stats['loss_total']:.4f}, "
+            f"act_acc={val_stats['act_acc']:.3f}, "
+            f"loc_acc={val_stats['loc_acc']:.3f}, "
+            f"id_acc={val_stats['id_acc']:.3f}, "
+            f"count_acc={val_stats['count_acc']:.3f}, "
+            f"MAE={val_stats['count_mae']:.3f}"
         )
 
         writer.add_scalar("val/loss", val_stats["loss"], epoch)

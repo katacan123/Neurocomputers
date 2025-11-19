@@ -3,13 +3,15 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from typing import Dict, Any, List
-import json
+# wimans/labels.py
 
-import numpy as np
+import json
+from typing import Dict, Any, List
 import pandas as pd
 
-# Define activity vocabulary: 0 MUST be "nothing" for count rule
+# -------------------------
+# Activity vocabulary
+# -------------------------
 ACTIVITIES = [
     "nothing",
     "walk",
@@ -26,65 +28,76 @@ activity_to_idx = {act: i for i, act in enumerate(ACTIVITIES)}
 idx_to_activity = {i: act for act, i in activity_to_idx.items()}
 ACT_NOTHING = activity_to_idx["nothing"]
 
-
+# -------------------------
+# Helper JSON encode/decode
+# -------------------------
 def encode_list(lst: List[int]) -> str:
-    """Encode list as JSON string for CSV."""
     return json.dumps(lst)
 
-
 def decode_list(s: str) -> List[int]:
-    """Decode JSON string list from CSV."""
     return json.loads(s)
 
-
-def build_sample_labels(raw_row: pd.Series, max_users: int) -> Dict[str, Any]:
+# -------------------------
+# Main label builder
+# -------------------------
+def build_sample_labels(row: pd.Series, max_users: int) -> Dict[str, Any]:
     """
-    Build per-user labels for one sample from a row of annotation.csv.
-
-    Expected columns (adapt if needed):
-      - user1_activity, user2_activity, ..., userN_activity
-      - user1_id, user2_id, ..., userN_id (optional)
-
-    If userX_activity is missing or NaN:
-      - that slot is treated as empty:
-          y_act = ACT_NOTHING
-          y_id = -1
-          slot_mask = 0
+    Builds y_act, y_loc, y_id (dummy = -1), slot_mask, gt_count
+    from columns like:
+      user_1_activity
+      user_1_location
+      ...
     """
-    y_act: List[int] = []
-    y_id: List[int] = []
-    slot_mask: List[int] = []
 
-    for slot in range(1, max_users + 1):
-        act_col = f"user{slot}_activity"
-        id_col = f"user{slot}_id"
+    y_act = []
+    y_loc = []
+    y_id  = []     # ALWAYS unknown → -1
+    slot_mask = []
 
-        # Activity
-        if (act_col in raw_row.index) and (not pd.isna(raw_row[act_col])):
-            act_name = str(raw_row[act_col]).strip()
+    # ----- Iterate over user slots -----
+    for k in range(1, max_users + 1):
+        act_col = f"user_{k}_activity"
+        loc_col = f"user_{k}_location"
+
+        # ---- Activity ----
+        if act_col in row and not pd.isna(row[act_col]):
+            act_name = str(row[act_col]).strip()
             act_idx = activity_to_idx.get(act_name, ACT_NOTHING)
-            mask_val = 1
+            user_present = True
         else:
             act_idx = ACT_NOTHING
+            user_present = False
+
+        # ---- Location ----
+        if loc_col in row and not pd.isna(row[loc_col]) and user_present:
+            try:
+                loc_idx = int(row[loc_col])
+            except Exception:
+                loc_idx = -1
+        else:
+            loc_idx = -1   # ignored during loss if -1
+
+        # ---- Identity (you don't have IDs) ----
+        id_idx = -1  # always unknown
+
+        # ---- Slot mask ----
+        # User is considered "present" if activity column exists and not nothing.
+        if user_present and act_idx != ACT_NOTHING:
+            mask_val = 1
+        else:
             mask_val = 0
 
-        # Identity (optional)
-        if (id_col in raw_row.index) and (not pd.isna(raw_row[id_col])):
-            try:
-                id_val = int(raw_row[id_col])
-            except Exception:
-                id_val = -1
-        else:
-            id_val = -1
-
         y_act.append(act_idx)
-        y_id.append(id_val)
+        y_loc.append(loc_idx)
+        y_id.append(id_idx)
         slot_mask.append(mask_val)
 
-    gt_count = int(sum(1 for a in y_act if a != ACT_NOTHING))
+    # ----- Count ground truth -----
+    gt_count = sum(slot_mask)
 
     return {
         "y_act": encode_list(y_act),
+        "y_loc": encode_list(y_loc),
         "y_id": encode_list(y_id),
         "slot_mask": encode_list(slot_mask),
         "gt_count": gt_count,

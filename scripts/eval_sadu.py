@@ -9,7 +9,8 @@ import os
 import torch
 import yaml
 
-from models.sadu import SADUWiMANS
+from models.sadu_full import SADUWiMANSFull as SADUWiMANS
+
 from wimans.dataset import build_dataloaders
 from training.loop import eval_one_epoch
 from training.metrics import (

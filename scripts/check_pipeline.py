@@ -8,7 +8,8 @@ import argparse
 import torch
 import yaml
 
-from models.sadu import SADUWiMANS
+from models.sadu_full import SADUWiMANSFull as SADUWiMANS
+
 from wimans.dataset import build_dataloaders
 from training.metrics import derive_counts_from_activity
 

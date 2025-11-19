@@ -11,7 +11,8 @@ import torch
 import yaml
 import pandas as pd
 
-from models.sadu import SADUWiMANS
+from models.sadu_full import SADUWiMANSFull as SADUWiMANS
+
 from wimans.labels import idx_to_activity
 from training.metrics import derive_counts_from_activity
 

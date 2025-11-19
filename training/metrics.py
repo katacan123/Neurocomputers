@@ -3,10 +3,46 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# training/metrics.py
+
 import torch
 from torch import Tensor
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 from collections import defaultdict
+
+
+def per_slot_accuracy(
+    logits: Tensor,              # (B, U, C)
+    targets: Tensor,             # (B, U)
+    slot_mask: Optional[Tensor] = None,  # (B, U)
+    ignore_index: Optional[int] = None,
+) -> float:
+    """
+    General per-slot accuracy used for activity / identity / location.
+
+    - Flatten to (B*U,) and mask invalid entries
+      (slot_mask == 0 or target == ignore_index).
+    """
+    B, U, C = logits.shape
+    preds = logits.argmax(dim=-1)  # (B, U)
+
+    preds_flat = preds.view(-1)
+    t_flat = targets.view(-1)
+    valid_mask = torch.ones_like(t_flat, dtype=torch.bool, device=logits.device)
+
+    if slot_mask is not None:
+        sm_flat = slot_mask.view(-1).to(logits.device)
+        valid_mask = valid_mask & (sm_flat > 0.5)
+
+    if ignore_index is not None:
+        valid_mask = valid_mask & (t_flat != ignore_index)
+
+    if valid_mask.sum() == 0:
+        return 0.0
+
+    correct = (preds_flat == t_flat) & valid_mask
+    acc = correct.sum().float() / valid_mask.sum().float()
+    return float(acc.item())
 
 
 def derive_counts_from_activity(
@@ -42,73 +78,3 @@ def count_metrics(pred_counts: Tensor, gt_counts: Tensor):
     correct = (pred_counts == gt_counts).float().mean().item()
     mae = (pred_counts.float() - gt_counts.float()).abs().mean().item()
     return correct, mae
-
-
-def activity_accuracy(
-    activity_logits: Tensor,  # (B, max_users, num_classes)
-    y_act: Tensor,            # (B, max_users)
-    slot_mask: Tensor = None, # (B, max_users)
-) -> float:
-    """
-    Per-slot activity accuracy (optionally masked).
-    """
-    B, U, C = activity_logits.shape
-    preds = activity_logits.argmax(dim=-1)
-    correct = (preds == y_act)
-
-    if slot_mask is not None:
-        mask = slot_mask.bool()
-        correct = correct & mask
-        denom = mask.sum()
-    else:
-        denom = torch.numel(y_act)
-
-    if denom.item() == 0:
-        return 0.0
-
-    acc = correct.sum().float() / denom.float()
-    return acc.item()
-
-
-def accumulate_env_metrics(
-    env_to_stats: Dict[str, Dict[str, float]],
-    env: str,
-    loss: float,
-    act_acc: float,
-    count_acc: float,
-    count_mae: float,
-    weight: int = 1,
-):
-    """
-    Accumulate environment-level metric sums.
-    """
-    if env not in env_to_stats:
-        env_to_stats[env] = {
-            "loss_sum": 0.0,
-            "act_acc_sum": 0.0,
-            "count_acc_sum": 0.0,
-            "count_mae_sum": 0.0,
-            "weight_sum": 0,
-        }
-
-    env_to_stats[env]["loss_sum"] += loss * weight
-    env_to_stats[env]["act_acc_sum"] += act_acc * weight
-    env_to_stats[env]["count_acc_sum"] += count_acc * weight
-    env_to_stats[env]["count_mae_sum"] += count_mae * weight
-    env_to_stats[env]["weight_sum"] += weight
-
-
-def finalize_env_metrics(env_to_stats: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
-    """
-    Normalize environment-level metric sums to averages.
-    """
-    out = {}
-    for env, d in env_to_stats.items():
-        w = max(d["weight_sum"], 1)
-        out[env] = {
-            "loss": d["loss_sum"] / w,
-            "act_acc": d["act_acc_sum"] / w,
-            "count_acc": d["count_acc_sum"] / w,
-            "count_mae": d["count_mae_sum"] / w,
-        }
-    return out

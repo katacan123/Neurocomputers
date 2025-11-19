@@ -32,7 +32,6 @@ train:
   weight_decay: 1e-4
   num_workers: 4
   pin_memory: true
-
   amp: true
   patience: 20
 
@@ -41,3 +40,14 @@ train:
 
   act_nothing_class: 0
   count_threshold: 0.6
+
+  # NEW: multi-task loss weights (paper does not specify non-unit)
+  loss_weights:
+    activity: 1.0
+    identity: 1.0
+    location: 1.0
+
+  # NEW: special labels for unknown ID / location
+  ignore_index_id: -1
+  ignore_index_loc: -1
+
